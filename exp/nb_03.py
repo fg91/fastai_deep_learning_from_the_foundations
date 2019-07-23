@@ -4,6 +4,9 @@
 #################################################
 # file to edit: dev_nb/03_minibatch_training.ipynb
 
+from exp.nb_02 import *
+import torch.nn.functional as F
+
 def accuracy(pred, targ):
     return (torch.argmax(pred, dim=-1)==targ).float().mean()
 
