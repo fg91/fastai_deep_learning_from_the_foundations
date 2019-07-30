@@ -12,31 +12,6 @@ def create_learner(model_func, loss_func, data):
 def get_model_func(lr=0.5):
     return partial(get_model, lr=lr)
 
-class Recorder(Callback):
-    def begin_fit(self):
-        self.lrs, self.losses = [], []
-
-    def after_batch(self):
-        if not self.in_train: return
-        self.lrs.append(self.opt.param_groups[-1]['lr'])  # self.opt delegates to runner which delegates to learn
-        self.losses.append(self.loss.detach().cpu())      # self.loss belongs to runner
-
-    def plot_lr(self): plt.plot(self.lrs)
-    def plot_loss(self): plt.plot(self.losses)
-
-class ParamScheduler(Callback):
-    _order = 1
-    def __init__(self, pname, sched_func):
-        self.pname, self.sched_func = pname, sched_func
-
-    def set_param(self):
-        for pg in self.opt.param_groups:
-            pg[self.pname] = self.sched_func(self.n_epochs/self.epochs)
-            # self.n_epochs=1.5 means we arrived at half of second epoch, self.epochs = total num of epochs
-
-    def begin_batch(self):
-        if self.in_train: self.set_param()
-
 def annealer(f):
     def _inner(start, end): return partial(f, start, end)
     return _inner
