@@ -35,110 +35,14 @@ def camel2snake(name):
     s1 = re.sub(_camel_re1, r'\1_\2', name)
     return re.sub(_camel_re2, r'\1_\2', s1).lower()
 
-class Callback():
-    _order = 0  # We need a mechanism to define an order in which callbacks run
-    def set_runner(self, run):
-        self.run = run
-    def __getattr__(self, k): return getattr(self.run, k)
-    @property
-    def name(self):
-        name = re.sub(r'Callback$', '', self.__class__.__name__)
-        return camel2snake(name or 'callback')
-
-class TrainEvalCallback(Callback):
-    def begin_fit(self):
-        self.run.n_epochs = 0
-        self.run.n_iter = 0
-
-    def after_batch(self):
-        if not self.in_train: return  # count of iters does not have to be increased
-        self.run.n_epochs += 1./self.iters  # delegate to the runner which has iters attribute (all_batches func)
-        self.run.n_iter   += 1
-
-    def begin_epoch(self):
-        self.run.n_epochs = self.epoch  # delegated to the runner which has a epoch attribute
-        self.model.train()              # self.model also delegates to runner which retuns learn.model
-        self.run.in_train = True
-
-    def begin_validate(self):
-        self.model.eval()
-        self.run.in_train = False
-
 from typing import *
 
 def listify(o):
     if o is None: return []
     if isinstance(o, list): return o
+    if isinstance(o, str): return [o]
     if isinstance(o, Iterable): return list(o)
     return [o]
-
-class Runner():
-    def __init__(self, cbs=None, cb_funcs=None):
-        cbs = listify(cbs)                              # Why don't we call setattr for the cb in cbs as well?
-        for cbf in listify(cb_funcs):
-            cb = cbf()  # function constructs the callback object
-            setattr(self, cb.name, cb)
-            cbs.append(cb)
-        self.stop, self.cbs = False, [TrainEvalCallback()] + cbs
-
-    @property
-    def opt(self):       return self.learn.opt
-    @property
-    def model(self):     return self.learn.model
-    @property
-    def loss_func(self): return self.learn.loss_func
-    @property
-    def data(self):      return self.learn.data
-
-    def one_batch(self, xb, yb):
-        self.xb, self.yb = xb, yb  # current batch
-        if self('begin_batch'): return  # calls __call__ of self with argument 'begin_batch':
-                                        # __call__ calls all callbacks that have attribute 'begin_batch'
-                                        # If any of them returns True, return
-        self.pred = self.model(self.xb)
-        if self('after_pred'): return
-        self.loss = self.loss_func(self.pred, self.yb)
-        if self('after_loss') or not self.in_train: return  # return if any cbs say so or if not in training
-        self.loss.backward()
-        if self('after_backward'): return
-        self.opt.step()
-        if self('after_step'): return
-        self.opt.zero_grad()
-
-    def all_batches(self, dl):
-        self.iters = len(dl)
-        for xb, yb in dl:
-            if self.stop: break
-            self.one_batch(xb, yb)
-            self('after_batch')
-        self.stop = False
-
-    def fit(self, epochs, learn):
-        self.epochs, self.learn = epochs, learn
-
-        try:
-            for cb in self.cbs: cb.set_runner(self)
-            if self('begin_fit'): return
-            for epoch in range(epochs):
-                self.epoch = epoch
-                if not self('begin_epoch'): self.all_batches(self.data.train_dl)
-                # rember if a cb returns True it means stop training
-
-                with torch.no_grad():
-                    if not self('begin_validate'): self.all_batches(self.data.valid_dl)
-                if self('after_epoch'): break
-        finally:
-            self('after_fit')
-            self.learn = None
-
-    def __call__(self, cb_name):  # handles the calls self('cb name')
-        for cb in sorted(self.cbs, key=lambda x: x._order):
-            f = getattr(cb, cb_name, None)
-            if f and f(): return True
-        return False
-
-        # For all callbacks check if they have an attribute cb_name, if yes set f to that attribute, if not set f to None.
-        # If f is not None call f(). If it returns True it means that that Callback intends to stop training!
 
 class AvgStats():
     def __init__(self, metrics, in_train):
@@ -166,21 +70,5 @@ class AvgStats():
         self.count += bn
         for i, m in enumerate(self.metrics):
             self.tot_mets[i] += m(run.pred, run.yb) * bn
-
-class AvgStatsCallback(Callback):
-    def __init__(self, metrics):
-        self.train_stats, self.valid_stats = AvgStats(metrics, True), AvgStats(metrics, False)
-
-    def begin_epoch(self):
-        self.train_stats.reset()
-        self.valid_stats.reset()
-
-    def after_loss(self):
-        stats = self.train_stats if self.in_train else self.valid_stats
-        with torch.no_grad(): stats.accumulate(self.run)
-
-    def after_epoch(self):
-        print(self.train_stats)
-        print(self.valid_stats)
 
 from functools import partial
