@@ -59,11 +59,12 @@ class ListContainer():
     def __init__(self, items): self.items = listify(items)
 
     def __getitem__(self, idx):
-        if isinstance(idx, (int, slice)): return self.items[idx]
-        if isinstance(idx[0], bool):
-            assert len(idx) == len(self)  # idx is supposed to be bool mask
-            return [o for m, o in zip(idx, self.items) if m]
-        return [self.items[i] for i in idx]
+        try: return self.items[idx]
+        except TypeError:
+            if isinstance(idx[0],bool):
+                assert len(idx)==len(self) # idx is supposed to be bool mask
+                return [o for m,o in zip(idx,self.items) if m]
+            return [self.items[i] for i in idx]
     def __len__(self): return len(self.items)
     def __iter__(self): return iter(self.items)
     def __setitem__(self, i, o): self.items[i] = o
@@ -127,15 +128,3 @@ def get_learn_run(nfs, data, lr, layer, cbs=None, opt_func=None, uniform=False, 
     model = get_cnn_model(data, nfs, layer, **kwargs)
     init_cnn(model, uniform=uniform)
     return get_runner(model, data, lr=lr, cbs=cbs, opt_func=opt_func)
-
-from IPython.display import display, Javascript
-def nb_auto_export():
-    display(Javascript("""{
-const ip = IPython.notebook
-if (ip) {
-    ip.save_notebook()
-    console.log('a')
-    const s = `!python notebook2script.py ${ip.notebook_name}`
-    if (ip.kernel) { ip.kernel.execute(s) }
-}
-}"""))
