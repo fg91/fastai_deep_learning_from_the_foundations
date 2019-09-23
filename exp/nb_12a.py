@@ -46,9 +46,91 @@ class WeightDropout(nn.Module):
             warnings.simplefilter("ignore")
             return self.module.forward(*args)
 
+class EmbeddingDropout(nn.Module):
+    "Applies dropout in the embedding layer by zeroing out some elements of the embedding vector."
+    def __init__(self, emb, embed_p):
+        super().__init__()
+        self.emb, self.embed_p = emb, embed_p
+        self.pad_idx = self.emb.padding_idx
+        if self.pad_idx is None: self.pad_idx = -1
+
+    def forward(self, words, scale=None):
+        if self.training and self.embed_p != 0:
+            size = (self.emb.weight.size(0), 1)  # (100, 1)
+            mask = dropout_mask(self.emb.weight.data, size, self.embed_p)
+            # list of 100 numbers being eiter 0 or 2
+            masked_embed = self.emb.weight * mask  # some words are zeroed
+
+        else: masked_embed = self.emb.weight
+        if scale: masked_embed.mul_(scale)
+
+        return F.embedding(words, masked_embed, self.pad_idx, self.emb.max_norm,
+                           self.emb.norm_type, self.emb.scale_grad_by_freq, self.emb.sparse)
+
 def to_detach(h):
     "Detaches h from its history."
     return h.detach() if type(h) == torch.Tensor else tuple(to_detach(v) for v in h)
+
+class AWD_LSTM(nn.Module):
+    "AWD-LSTM inspired by https://arxiv.org/abs/1708.02182."
+    initrange=0.1
+
+    def __init__(self, vocab_sz, emb_sz, n_hid, n_layers, pad_token,
+                 hidden_p=0.2, input_p=0.6, embed_p=0.1, weight_p=0.5):
+        super().__init__()
+        self.bs, self.emb_sz, self.n_hid, self.n_layers = 1, emb_sz, n_hid, n_layers  # bs = 1 to make it reset h
+        self.emb = nn.Embedding(vocab_sz, emb_sz, padding_idx=pad_token)
+        self.emb_dp = EmbeddingDropout(self.emb, embed_p)
+        self.rnns = [nn.LSTM(input_size=emb_sz if l == 0 else n_hid,
+                             hidden_size=(n_hid if l != n_layers - 1 else emb_sz),
+                             num_layers=1, batch_first=True
+                            ) for l in range(n_layers)]
+        """
+        (Pdb) self.rnns[0]
+        LSTM(300, 500, batch_first=True)
+        (Pdb) self.rnns[1]
+        LSTM(500, 500, batch_first=True)
+        (Pdb) self.rnns[2]
+        LSTM(500, 300, batch_first=True)
+        (Pdb) self.rnns[3]
+        """
+        self.rnns = nn.ModuleList([WeightDropout(rnn, weight_p) for rnn in self.rnns])
+        # Initialize embedding
+        self.emb.weight.data.uniform_(-self.initrange, self.initrange)
+
+        self.input_dp = RNNDropout(input_p)
+        self.hidden_dps = nn.ModuleList([RNNDropout(hidden_p) for l in range(n_layers)])
+
+    def forward(self, input):
+        bs, sl = input.size()
+        if bs!=self.bs:  # self.bs = 1 at beginning, forces to reset h
+            self.bs=bs
+            self.reset()
+
+        # self.hidden ist list of len 3 of tuples of len 2 of tensors of shape [1, 64, 500/300]
+        # input shape [64, 70]
+        raw_output = self.input_dp(self.emb_dp(input))  # [64, 70, 300], dropout on input along seq dimension
+        new_hidden,raw_outputs,outputs = [],[],[]
+
+        for l, (rnn,hid_dp) in enumerate(zip(self.rnns, self.hidden_dps)):
+            raw_output, new_h = rnn(raw_output, self.hidden[l])
+            # new_h has shape [1, 64, 500] for l = 0 (final hidden state), raw_output [64, 70, 500] for l == 0
+            new_hidden.append(new_h)
+            raw_outputs.append(raw_output)
+            if l != self.n_layers - 1: raw_output = hid_dp(raw_output)  # RNNDropout along seq dim on h's
+            outputs.append(raw_output)
+        # here new_hidden is list of len n_layers with tuples of two tensors h,c each
+        self.hidden = to_detach(new_hidden)
+        return raw_outputs, outputs  # with and without dropout
+
+    def _one_hidden(self, l):
+        "Return one hidden state."
+        nh = self.n_hid if l != self.n_layers - 1 else self.emb_sz
+        return next(self.parameters()).new(1, self.bs, nh).zero_()
+
+    def reset(self):
+        "Reset the hidden states."
+        self.hidden = [(self._one_hidden(l), self._one_hidden(l)) for l in range(self.n_layers)]
 
 class LinearDecoder(nn.Module):
     def __init__(self, n_out, n_hid, output_p, tie_encoder=None, bias=True):
@@ -71,6 +153,13 @@ class SequentialRNN(nn.Sequential):
     def reset(self):
         for c in self.children():
             if hasattr(c, 'reset'): c.reset()
+
+def get_language_model(vocab_sz, emb_sz, n_hid, n_layers, pad_token, output_p=0.4, hidden_p=0.2, input_p=0.6,
+                       embed_p=0.1, weight_p=0.5, tie_weights=True, bias=True):
+    rnn_enc = AWD_LSTM(vocab_sz, emb_sz, n_hid=n_hid, n_layers=n_layers, pad_token=pad_token,
+                       hidden_p=hidden_p, input_p=input_p, embed_p=embed_p, weight_p=weight_p)
+    enc = rnn_enc.emb if tie_weights else None
+    return SequentialRNN(rnn_enc, LinearDecoder(vocab_sz, emb_sz, output_p, tie_encoder=enc, bias=bias))
 
 class GradientClipping(Callback):
     def __init__(self, clip=None): self.clip = clip
