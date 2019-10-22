@@ -6,6 +6,10 @@
 
 from exp.nb_08 import *
 
+def sgd_step(p, lr, **kwargs):
+    p.data.add_(-lr, p.grad.data)
+    return p
+
 class Recorder(Callback):
     def begin_fit(self): self.lrs,self.losses = [],[]
 
